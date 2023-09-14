@@ -1,16 +1,17 @@
 import os
 from contextlib import asynccontextmanager
 from http import HTTPStatus
+from importlib.metadata import files
 from pathlib import Path
 from typing import Any
 
 import openai
+import requests
 import uvicorn
 from dotenv import load_dotenv, find_dotenv
 from fastapi import FastAPI, HTTPException, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
 from langchain.chains import ConversationalRetrievalChain
-from langchain.chains.base import Chain
 from langchain.chat_models import ChatOpenAI
 from langchain.document_loaders import YoutubeAudioLoader, PyPDFLoader
 from langchain.document_loaders.generic import GenericLoader
@@ -111,7 +112,27 @@ def encode_youtube_url(url) -> str:
     return url.lstrip("https://www.youtube.com/watch?v=") + ".txt"
 
 
-@app.get("/youtube")
+@app.post("/images")
+def upload_images(files: list[UploadFile]) -> dict[str, str]:
+    docs = []
+
+    for file in files:
+        response = requests.post("https://api.ocr.space/parse/image",
+                                 files={'file': (
+                                     file.filename, file.file)},
+                                 headers={
+                                     'apikey': os.getenv('OCR_SPACE_API_KEY')
+                                 })
+        docs.append(response.json()['ParsedResults'][0]['ParsedText'])
+
+    splits = text_splitter.split_text(*docs)
+    vector_db.add_texts(splits)
+    vector_db.persist()
+
+    return {"message": f"Images uploaded successfully"}
+
+
+@app.post("/youtube")
 def load_youtube_transcript(url: str) -> dict[str, str]:
     youtube_audio_save_dir = Path("docs/youtube")
     youtube_audio_save_dir.mkdir(exist_ok=True, parents=True)
