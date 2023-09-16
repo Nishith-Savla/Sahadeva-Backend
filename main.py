@@ -3,13 +3,14 @@ from contextlib import asynccontextmanager
 from http import HTTPStatus
 from importlib.metadata import files
 from pathlib import Path
-from typing import Any
+from typing import Annotated
 
+import mysql.connector
 import openai
 import requests
 import uvicorn
 from dotenv import load_dotenv, find_dotenv
-from fastapi import FastAPI, HTTPException, UploadFile
+from fastapi import FastAPI, HTTPException, UploadFile, Form
 from fastapi.middleware.cors import CORSMiddleware
 from langchain.chains import ConversationalRetrievalChain
 from langchain.chat_models import ChatOpenAI
@@ -19,17 +20,25 @@ from langchain.document_loaders.parsers import OpenAIWhisperParser
 from langchain.embeddings import OpenAIEmbeddings
 from langchain.text_splitter import RecursiveCharacterTextSplitter
 from langchain.vectorstores import Chroma
+from pydantic import BaseModel
 
 _ = load_dotenv(find_dotenv())  # read local .env file
 
 
+def connect_to_database() -> mysql.connector.connection.MySQLConnection:
+    return mysql.connector.connect(host=os.getenv('DB_HOST'), database=os.getenv('DB_NAME'),
+                                   user=os.getenv('DB_USER'), password=os.getenv('DB_PASS'))
+
+
 @asynccontextmanager
 async def lifespan(_: FastAPI):
-    global vector_db
+    global vector_db, db
+    db = connect_to_database()
     vector_db = Chroma(persist_directory=CHROMA_PERSIST_DIRECTORY,
                        embedding_function=OpenAIEmbeddings())
     load_qa()
     yield
+    db.close()
 
 
 app = FastAPI(lifespan=lifespan)
@@ -75,9 +84,13 @@ def load_qa():
     )
 
 
+class Message(BaseModel):
+    role: str
+    content: str
+
+
 @app.post("/")
-def root(messages: list[dict[str, str]] = "") -> dict[str, Any]:
-    global qa
+def root(messages: list[Message] = "") -> dict[str, list[Message]]:
     if not messages:
         raise HTTPException(
             status_code=HTTPStatus.BAD_REQUEST,
@@ -86,10 +99,54 @@ def root(messages: list[dict[str, str]] = "") -> dict[str, Any]:
 
     chat_history = []
     for i in range(0, len(messages) - 1, 2):
-        chat_history.append((messages[i]['content'], messages[i + 1]['content']))
-    message = qa.run(question=messages[-1]['content'], chat_history=chat_history)
-    messages.append({"role": "assistant", "content": message})
+        chat_history.append((messages[i].content, messages[i + 1].content))
+    message = qa.run(question=messages[-1].content, chat_history=chat_history)
+    messages.append(Message(role="assistant", content=message))
     return {"messages": messages}
+
+
+@app.post("/signup")
+async def signup(username: Annotated[str, Form()], password: Annotated[str, Form()]) -> dict[
+    str, str]:
+    mysql_query = "SELECT * FROM users WHERE username = %s"
+    with db.cursor() as cursor:
+        cursor.execute(mysql_query, (username,))
+        result = cursor.fetchone()
+        if result:
+            raise HTTPException(
+                status_code=HTTPStatus.BAD_REQUEST,
+                detail="Email already exists",
+            )
+
+    mysql_query = "INSERT INTO users (username, password) VALUES (%s, %s)"
+    with db.cursor() as cursor:
+        cursor.execute(mysql_query, (username, password))
+        db.commit()
+
+    return {"message": "Signup successful"}
+
+
+@app.post("/login")
+async def login(username: Annotated[str, Form()], password: Annotated[str, Form()]) -> dict[
+    str, str]:
+    mysql_query = "SELECT * FROM users WHERE username = %s AND password = %s"
+    with db.cursor() as cursor:
+        cursor.execute(mysql_query, (username, password))
+        result = cursor.fetchone()
+        if not result:
+            raise HTTPException(
+                status_code=HTTPStatus.UNAUTHORIZED,
+                detail="Incorrect username or password",
+            )
+        _username, _password = result
+
+        if username != _username or password != _password:
+            raise HTTPException(
+                status_code=HTTPStatus.UNAUTHORIZED,
+                detail="Incorrect username or password",
+            )
+
+    return {"message": "Login successful"}
 
 
 @app.post("/upload")
@@ -146,11 +203,6 @@ def load_youtube_transcript(url: str) -> dict[str, str]:
     vector_db.add_documents(docs)
     vector_db.persist()
 
-    # output_file = Path("docs/youtube-transcripts") / encode_youtube_url(url)
-    # output_file.parent.mkdir(exist_ok=True, parents=True)
-    # for doc in docs:
-    #     output_file.write_text(doc.page_content)
-    #
     return {"message": f"Transcript for {url} saved successfully"}
 
 
