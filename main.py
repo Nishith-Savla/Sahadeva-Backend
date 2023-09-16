@@ -44,12 +44,11 @@ async def lifespan(_: FastAPI):
 app = FastAPI(lifespan=lifespan)
 
 openai.api_key = os.getenv('OPENAI_API_KEY')
-origins = ["*"]
 CHROMA_PERSIST_DIRECTORY = 'docs/chroma/'
 
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=origins,
+    allow_origins=["*"],
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
@@ -106,11 +105,13 @@ def root(messages: list[Message] = "") -> dict[str, list[Message]]:
 
 
 @app.post("/signup")
-async def signup(username: Annotated[str, Form()], password: Annotated[str, Form()]) -> dict[
+async def signup(name: Annotated[str, Form()],
+                 email: Annotated[str, Form()],
+                 password: Annotated[str, Form()]) -> dict[
     str, str]:
-    mysql_query = "SELECT * FROM users WHERE username = %s"
+    mysql_query = "SELECT * FROM users WHERE email = %s"
     with db.cursor() as cursor:
-        cursor.execute(mysql_query, (username,))
+        cursor.execute(mysql_query, (email,))
         result = cursor.fetchone()
         if result:
             raise HTTPException(
@@ -118,32 +119,32 @@ async def signup(username: Annotated[str, Form()], password: Annotated[str, Form
                 detail="Email already exists",
             )
 
-    mysql_query = "INSERT INTO users (username, password) VALUES (%s, %s)"
+    mysql_query = "INSERT INTO users (name, email, password) VALUES (%s, %s, %s)"
     with db.cursor() as cursor:
-        cursor.execute(mysql_query, (username, password))
+        cursor.execute(mysql_query, (name, email, password))
         db.commit()
 
     return {"message": "Signup successful"}
 
 
 @app.post("/login")
-async def login(username: Annotated[str, Form()], password: Annotated[str, Form()]) -> dict[
+async def login(email: Annotated[str, Form()], password: Annotated[str, Form()]) -> dict[
     str, str]:
-    mysql_query = "SELECT * FROM users WHERE username = %s AND password = %s"
+    mysql_query = "SELECT * FROM users WHERE email = %s AND password = %s"
     with db.cursor() as cursor:
-        cursor.execute(mysql_query, (username, password))
+        cursor.execute(mysql_query, (email, password))
         result = cursor.fetchone()
         if not result:
             raise HTTPException(
                 status_code=HTTPStatus.UNAUTHORIZED,
-                detail="Incorrect username or password",
+                detail="Incorrect email or password",
             )
-        _username, _password = result
+        _email, _password, _name = result
 
-        if username != _username or password != _password:
+        if email != _email or password != _password:
             raise HTTPException(
                 status_code=HTTPStatus.UNAUTHORIZED,
-                detail="Incorrect username or password",
+                detail="Incorrect email or password",
             )
 
     return {"message": "Login successful"}
