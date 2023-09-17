@@ -1,16 +1,13 @@
-import os
 from contextlib import asynccontextmanager
 from http import HTTPStatus
 from importlib.metadata import files
 from pathlib import Path
-from typing import Annotated
 
 import mysql.connector
 import openai
-import requests
 import uvicorn
-from dotenv import load_dotenv, find_dotenv
-from fastapi import FastAPI, HTTPException, UploadFile, Form
+from dotenv import load_dotenv
+from fastapi import FastAPI, HTTPException, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
 from langchain.chains import ConversationalRetrievalChain
 from langchain.chat_models import ChatOpenAI
@@ -20,9 +17,13 @@ from langchain.document_loaders.parsers import OpenAIWhisperParser
 from langchain.embeddings import OpenAIEmbeddings
 from langchain.text_splitter import RecursiveCharacterTextSplitter
 from langchain.vectorstores import Chroma
-from pydantic import BaseModel
 
-_ = load_dotenv(find_dotenv())  # read local .env file
+from helper import *
+from models.Message import Message, MessageResponse
+from models.Response import Response
+from models.User import UserSignup, UserLogin
+
+load_dotenv()  # read local .env file
 
 
 def connect_to_database() -> mysql.connector.connection.MySQLConnection:
@@ -75,21 +76,11 @@ vector_db: Chroma | None = None
 def load_qa():
     global vector_db, qa
     retriever = vector_db.as_retriever(search_type="mmr", search_kwargs={"top_k": 5})
-    qa = ConversationalRetrievalChain.from_llm(
-        ChatOpenAI(temperature=0),
-        retriever=retriever,
-        # return_source_documents=True,
-        # return_generated_question=True,
-    )
-
-
-class Message(BaseModel):
-    role: str
-    content: str
+    qa = ConversationalRetrievalChain.from_llm(ChatOpenAI(temperature=0), retriever=retriever)
 
 
 @app.post("/")
-def root(messages: list[Message] = "") -> dict[str, list[Message]]:
+def root(messages: list[Message]) -> MessageResponse:
     if not messages:
         raise HTTPException(
             status_code=HTTPStatus.BAD_REQUEST,
@@ -99,19 +90,17 @@ def root(messages: list[Message] = "") -> dict[str, list[Message]]:
     chat_history = []
     for i in range(0, len(messages) - 1, 2):
         chat_history.append((messages[i].content, messages[i + 1].content))
+
     message = qa.run(question=messages[-1].content, chat_history=chat_history)
     messages.append(Message(role="assistant", content=message))
-    return {"messages": messages}
+    return MessageResponse(messages=messages)
 
 
 @app.post("/signup")
-async def signup(name: Annotated[str, Form()],
-                 email: Annotated[str, Form()],
-                 password: Annotated[str, Form()]) -> dict[
-    str, str]:
+async def signup(user_signup: UserSignup) -> Response:
     mysql_query = "SELECT * FROM users WHERE email = %s"
     with db.cursor() as cursor:
-        cursor.execute(mysql_query, (email,))
+        cursor.execute(mysql_query, (user_signup.email,))
         result = cursor.fetchone()
         if result:
             raise HTTPException(
@@ -121,37 +110,36 @@ async def signup(name: Annotated[str, Form()],
 
     mysql_query = "INSERT INTO users (name, email, password) VALUES (%s, %s, %s)"
     with db.cursor() as cursor:
-        cursor.execute(mysql_query, (name, email, password))
+        cursor.execute(mysql_query, (user_signup.name, user_signup.email, user_signup.password))
         db.commit()
 
-    return {"message": "Signup successful"}
+    return Response(message="Signup successful")
 
 
 @app.post("/login")
-async def login(email: Annotated[str, Form()], password: Annotated[str, Form()]) -> dict[
-    str, str]:
-    mysql_query = "SELECT * FROM users WHERE email = %s AND password = %s"
+async def login(user_login: UserLogin) -> Response:
+    mysql_query = "SELECT email, password FROM users WHERE email = %s AND password = %s"
     with db.cursor() as cursor:
-        cursor.execute(mysql_query, (email, password))
+        cursor.execute(mysql_query, (user_login.email, user_login.password))
         result = cursor.fetchone()
         if not result:
             raise HTTPException(
                 status_code=HTTPStatus.UNAUTHORIZED,
                 detail="Incorrect email or password",
             )
-        _email, _password, _name = result
+        email, password = result
 
-        if email != _email or password != _password:
+        if user_login.email != email or user_login.password != password:
             raise HTTPException(
                 status_code=HTTPStatus.UNAUTHORIZED,
                 detail="Incorrect email or password",
             )
 
-    return {"message": "Login successful"}
+    return Response(message="Login successful")
 
 
 @app.post("/upload")
-def upload_documents(files: list[UploadFile]) -> dict[str, str]:
+def upload_documents(files: list[UploadFile]) -> Response:
     docs = []
     for file in files:
         output_file = Path("docs/pdfs") / file.filename
@@ -163,35 +151,26 @@ def upload_documents(files: list[UploadFile]) -> dict[str, str]:
     vector_db.add_documents(splits)
     vector_db.persist()
 
-    return {"message": f"Documents uploaded successfully"}
-
-
-def encode_youtube_url(url) -> str:
-    return url.lstrip("https://www.youtube.com/watch?v=") + ".txt"
+    return Response(message=f"{len(files)} document(s) uploaded successfully")
 
 
 @app.post("/images")
-def upload_images(files: list[UploadFile]) -> dict[str, str]:
+def upload_images(files: list[UploadFile]) -> Response:
     docs = []
 
     for file in files:
-        response = requests.post("https://api.ocr.space/parse/image",
-                                 files={'file': (
-                                     file.filename, file.file)},
-                                 headers={
-                                     'apikey': os.getenv('OCR_SPACE_API_KEY')
-                                 })
-        docs.append(response.json()['ParsedResults'][0]['ParsedText'])
+        parsed_text = extract_text_from_image(file.file, file.filename)
+        docs.append(parsed_text)
 
     splits = text_splitter.split_text(*docs)
     vector_db.add_texts(splits)
     vector_db.persist()
 
-    return {"message": f"Images uploaded successfully"}
+    return Response(message=f"{len(files)} images(s) uploaded successfully")
 
 
 @app.post("/youtube")
-def load_youtube_transcript(url: str) -> dict[str, str]:
+def load_youtube_transcript(url: str) -> Response:
     youtube_audio_save_dir = Path("docs/youtube")
     youtube_audio_save_dir.mkdir(exist_ok=True, parents=True)
 
@@ -204,7 +183,7 @@ def load_youtube_transcript(url: str) -> dict[str, str]:
     vector_db.add_documents(docs)
     vector_db.persist()
 
-    return {"message": f"Transcript for {url} saved successfully"}
+    return Response(message=f"Transcript for {url} saved successfully")
 
 
 if __name__ == '__main__':
