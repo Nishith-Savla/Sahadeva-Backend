@@ -1,6 +1,7 @@
 from contextlib import asynccontextmanager
 from http import HTTPStatus
 from importlib.metadata import files
+from itertools import chain
 from pathlib import Path
 
 import mysql.connector
@@ -17,6 +18,7 @@ from langchain.document_loaders.parsers import OpenAIWhisperParser
 from langchain.embeddings import OpenAIEmbeddings
 from langchain.text_splitter import RecursiveCharacterTextSplitter
 from langchain.vectorstores import Chroma
+from scenedetect import AdaptiveDetector, detect, open_video, save_images
 
 from helper import *
 from models.Message import Message, MessageResponse
@@ -62,16 +64,6 @@ text_splitter = RecursiveCharacterTextSplitter(
 qa: ConversationalRetrievalChain | None = None
 vector_db: Chroma | None = None
 
-
-# template = """Use the following pieces of context to answer the question at the end.
-# If you don't know the answer, just say that you don't know, don't try to make up an answer.
-# Use three sentences maximum. Keep the answer as concise as possible.
-# Always say "Thanks for asking!" at the end of the answer.
-#
-# Context: {context}
-# Question: {question}
-# Helpful Answer:"""
-# QA_CHAIN_PROMPT = PromptTemplate(input_variables=["context", "question"], template=template)
 
 def load_qa():
     global vector_db, qa
@@ -157,16 +149,45 @@ def upload_documents(files: list[UploadFile]) -> Response:
 @app.post("/images")
 def upload_images(files: list[UploadFile]) -> Response:
     docs = []
+    splits = []
 
     for file in files:
         parsed_text = extract_text_from_image(file.file, file.filename)
         docs.append(parsed_text)
 
-    splits = text_splitter.split_text(*docs)
+    for doc in docs:
+        splits.extend(text_splitter.split_text(doc))
     vector_db.add_texts(splits)
     vector_db.persist()
 
     return Response(message=f"{len(files)} images(s) uploaded successfully")
+
+
+@app.post("/videos")
+def upload_video(files: list[UploadFile]) -> Response:
+    docs = []
+    for file in files:
+        output_file = Path("docs/videos") / file.filename
+        output_file.parent.mkdir(exist_ok=True, parents=True)
+        output_file.write_bytes(file.file.read())
+
+        scene_list = detect(output_file.as_posix(), AdaptiveDetector(adaptive_threshold=50))
+
+        frames = chain.from_iterable(save_images(scene_list, open_video(output_file.as_posix()),
+                                                 output_dir="docs/frames/").values())
+        for frame_path in frames:
+            with open("docs/frames/" + frame_path, 'rb') as frame:
+                parsed_text = extract_text_from_image(frame, frame_path)
+            docs.append(parsed_text)
+
+    splits = []
+    for doc in docs:
+        splits.extend(text_splitter.split_text(doc))
+
+    vector_db.add_texts(splits)
+    vector_db.persist()
+
+    return Response(message=f"{len(files)} video(s) uploaded successfully")
 
 
 @app.post("/youtube")
