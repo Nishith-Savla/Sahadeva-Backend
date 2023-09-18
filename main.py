@@ -1,14 +1,15 @@
+# noinspection PyShadowingNames
 from contextlib import asynccontextmanager
 from http import HTTPStatus
 from importlib.metadata import files
 
-import mysql.connector
 import openai
 import uvicorn
 from dotenv import load_dotenv
 from fastapi import FastAPI, HTTPException, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
 from langchain.chains import ConversationalRetrievalChain
+from langchain.chains.conversational_retrieval.base import BaseConversationalRetrievalChain
 from langchain.chat_models import ChatOpenAI
 from langchain.document_loaders import YoutubeAudioLoader, PyPDFLoader, Blob
 from langchain.document_loaders.generic import GenericLoader
@@ -24,38 +25,8 @@ from models.Response import Response
 from models.User import UserSignup, UserLogin
 
 load_dotenv()  # read local .env file
-CHROMA_PERSIST_DIRECTORY = os.getenv('CHROMA_PERSIST_DIRECTORY', 'docs/chroma/')
-
-
-def connect_to_database() -> mysql.connector.connection.MySQLConnection:
-    return mysql.connector.connect(host=os.getenv('DB_HOST'), database=os.getenv('DB_NAME'),
-                                   user=os.getenv('DB_USER'), password=os.getenv('DB_PASS'))
-
-
-@asynccontextmanager
-async def lifespan(_: FastAPI):
-    # On startup
-    global vector_db, db
-    db = connect_to_database()
-    vector_db = Chroma(persist_directory=CHROMA_PERSIST_DIRECTORY,
-                       embedding_function=OpenAIEmbeddings())
-    load_qa()
-    yield  # When the app is running
-    # On shutdown
-    db.close()
-
-
-app = FastAPI(lifespan=lifespan)
-
 openai.api_key = os.getenv('OPENAI_API_KEY')
-
-app.add_middleware(
-    CORSMiddleware,
-    allow_origins=['*'],
-    allow_credentials=True,
-    allow_methods=['*'],
-    allow_headers=['*'],
-)
+CHROMA_PERSIST_DIRECTORY = os.getenv('CHROMA_PERSIST_DIRECTORY', 'docs/chroma/')
 
 text_splitter = RecursiveCharacterTextSplitter(
     chunk_size=1500,
@@ -63,12 +34,36 @@ text_splitter = RecursiveCharacterTextSplitter(
 )
 qa: ConversationalRetrievalChain | None = None
 vector_db: Chroma | None = None
+db: PooledMySQLConnection | MySQLConnection | None = None
 
 
-def load_qa():
-    global vector_db, qa
+def load_qa(vector_db: Chroma) -> BaseConversationalRetrievalChain:
     retriever = vector_db.as_retriever(search_type='mmr', search_kwargs={'top_k': 5})
-    qa = ConversationalRetrievalChain.from_llm(ChatOpenAI(temperature=0), retriever=retriever)
+    return ConversationalRetrievalChain.from_llm(ChatOpenAI(temperature=0), retriever=retriever)
+
+
+@asynccontextmanager
+async def lifespan(_: FastAPI):
+    # On startup
+    global qa, vector_db, db
+    db = connect_to_database()
+    vector_db = Chroma(persist_directory=CHROMA_PERSIST_DIRECTORY,
+                       embedding_function=OpenAIEmbeddings())
+    qa = load_qa(vector_db)
+
+    yield  # When the app is running
+    # On shutdown
+    db.close()
+
+
+app = FastAPI(lifespan=lifespan)
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=['*'],
+    allow_credentials=True,
+    allow_methods=['*'],
+    allow_headers=['*'],
+)
 
 
 @app.post('/')

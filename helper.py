@@ -6,9 +6,17 @@ from time import sleep
 from typing import BinaryIO
 
 import bcrypt
+import mysql.connector
 import requests
 from moviepy.video.io.VideoFileClip import VideoFileClip
+from mysql.connector import MySQLConnection
+from mysql.connector.pooling import PooledMySQLConnection
 from scenedetect import AdaptiveDetector, detect, open_video, save_images
+
+
+def connect_to_database() -> PooledMySQLConnection | MySQLConnection | None:
+    return mysql.connector.connect(host=os.getenv('DB_HOST'), database=os.getenv('DB_NAME'),
+                                   user=os.getenv('DB_USER'), password=os.getenv('DB_PASS'))
 
 
 def extract_text_from_image(file: BinaryIO, filename: str) -> str:
