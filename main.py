@@ -1,8 +1,6 @@
 from contextlib import asynccontextmanager
 from http import HTTPStatus
 from importlib.metadata import files
-from itertools import chain
-from pathlib import Path
 
 import mysql.connector
 import openai
@@ -12,13 +10,13 @@ from fastapi import FastAPI, HTTPException, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
 from langchain.chains import ConversationalRetrievalChain
 from langchain.chat_models import ChatOpenAI
-from langchain.document_loaders import YoutubeAudioLoader, PyPDFLoader
+from langchain.document_loaders import YoutubeAudioLoader, PyPDFLoader, Blob
 from langchain.document_loaders.generic import GenericLoader
 from langchain.document_loaders.parsers import OpenAIWhisperParser
 from langchain.embeddings import OpenAIEmbeddings
 from langchain.text_splitter import RecursiveCharacterTextSplitter
 from langchain.vectorstores import Chroma
-from scenedetect import AdaptiveDetector, detect, open_video, save_images
+from mysql.connector.types import RowType
 
 from helper import *
 from models.Message import Message, MessageResponse
@@ -26,6 +24,7 @@ from models.Response import Response
 from models.User import UserSignup, UserLogin
 
 load_dotenv()  # read local .env file
+CHROMA_PERSIST_DIRECTORY = os.getenv('CHROMA_PERSIST_DIRECTORY', 'docs/chroma/')
 
 
 def connect_to_database() -> mysql.connector.connection.MySQLConnection:
@@ -35,26 +34,27 @@ def connect_to_database() -> mysql.connector.connection.MySQLConnection:
 
 @asynccontextmanager
 async def lifespan(_: FastAPI):
+    # On startup
     global vector_db, db
     db = connect_to_database()
     vector_db = Chroma(persist_directory=CHROMA_PERSIST_DIRECTORY,
                        embedding_function=OpenAIEmbeddings())
     load_qa()
-    yield
+    yield  # When the app is running
+    # On shutdown
     db.close()
 
 
 app = FastAPI(lifespan=lifespan)
 
 openai.api_key = os.getenv('OPENAI_API_KEY')
-CHROMA_PERSIST_DIRECTORY = 'docs/chroma/'
 
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
+    allow_origins=['*'],
     allow_credentials=True,
-    allow_methods=["*"],
-    allow_headers=["*"],
+    allow_methods=['*'],
+    allow_headers=['*'],
 )
 
 text_splitter = RecursiveCharacterTextSplitter(
@@ -67,16 +67,16 @@ vector_db: Chroma | None = None
 
 def load_qa():
     global vector_db, qa
-    retriever = vector_db.as_retriever(search_type="mmr", search_kwargs={"top_k": 5})
+    retriever = vector_db.as_retriever(search_type='mmr', search_kwargs={'top_k': 5})
     qa = ConversationalRetrievalChain.from_llm(ChatOpenAI(temperature=0), retriever=retriever)
 
 
-@app.post("/")
+@app.post('/')
 def root(messages: list[Message]) -> MessageResponse:
     if not messages:
         raise HTTPException(
             status_code=HTTPStatus.BAD_REQUEST,
-            detail="Messages are required",
+            detail='Messages are required',
         )
 
     chat_history = []
@@ -84,69 +84,70 @@ def root(messages: list[Message]) -> MessageResponse:
         chat_history.append((messages[i].content, messages[i + 1].content))
 
     message = qa.run(question=messages[-1].content, chat_history=chat_history)
-    messages.append(Message(role="assistant", content=message))
+    messages.append(Message(role='assistant', content=message))
     return MessageResponse(messages=messages)
 
 
-@app.post("/signup")
+@app.post('/signup')
 async def signup(user_signup: UserSignup) -> Response:
-    mysql_query = "SELECT * FROM users WHERE email = %s"
+    mysql_query = 'SELECT * FROM users WHERE email = %s'
     with db.cursor() as cursor:
         cursor.execute(mysql_query, (user_signup.email,))
         result = cursor.fetchone()
         if result:
             raise HTTPException(
                 status_code=HTTPStatus.BAD_REQUEST,
-                detail="Email already exists",
+                detail='Email already exists',
             )
 
-    mysql_query = "INSERT INTO users (name, email, password) VALUES (%s, %s, %s)"
+    mysql_query = 'INSERT INTO users (name, email, password) VALUES (%s, %s, %s)'
     with db.cursor() as cursor:
         cursor.execute(mysql_query, (user_signup.name, user_signup.email, user_signup.password))
         db.commit()
 
-    return Response(message="Signup successful")
+    return Response(message='Signup successful')
 
 
-@app.post("/login")
+@app.post('/login')
 async def login(user_login: UserLogin) -> Response:
-    mysql_query = "SELECT email, password FROM users WHERE email = %s AND password = %s"
+    mysql_query = 'SELECT email, password FROM users WHERE email = %s AND password = %s'
     with db.cursor() as cursor:
         cursor.execute(mysql_query, (user_login.email, user_login.password))
-        result = cursor.fetchone()
-        if not result:
+        user: RowType = cursor.fetchone()
+        if not user:
             raise HTTPException(
                 status_code=HTTPStatus.UNAUTHORIZED,
-                detail="Incorrect email or password",
+                detail='Incorrect email or password',
             )
-        email, password = result
+        email, password = user
 
         if user_login.email != email or user_login.password != password:
             raise HTTPException(
                 status_code=HTTPStatus.UNAUTHORIZED,
-                detail="Incorrect email or password",
+                detail='Incorrect email or password',
             )
 
-    return Response(message="Login successful")
+    return Response(message='Login successful')
 
 
-@app.post("/upload")
+@app.post('/upload')
 def upload_documents(files: list[UploadFile]) -> Response:
     docs = []
     for file in files:
-        output_file = Path("docs/pdfs") / file.filename
+        output_file = Path('docs/pdfs') / file.filename
         output_file.parent.mkdir(exist_ok=True, parents=True)
         output_file.write_bytes(file.file.read())
         docs.extend(PyPDFLoader(output_file.as_posix()).load())
+        output_file.unlink()
 
     splits = text_splitter.split_documents(docs)
     vector_db.add_documents(splits)
     vector_db.persist()
 
-    return Response(message=f"{len(files)} document(s) uploaded successfully")
+    return Response(message=f'{len(files)} document(s) uploaded successfully')
 
 
-@app.post("/images")
+@app.post('/images')
 def upload_images(files: list[UploadFile]) -> Response:
     docs = []
     splits = []
@@ -160,39 +161,44 @@ def upload_images(files: list[UploadFile]) -> Response:
     vector_db.add_texts(splits)
     vector_db.persist()
 
-    return Response(message=f"{len(files)} images(s) uploaded successfully")
+    return Response(message=f'{len(files)} images(s) uploaded successfully')
 
 
-@app.post("/videos")
+@app.post('/videos')
 def upload_video(files: list[UploadFile]) -> Response:
+    texts = []
     docs = []
+    openai_whisper_parser = OpenAIWhisperParser()
     for file in files:
-        output_file = Path("docs/videos") / file.filename
+        output_file = Path('docs/videos') / file.filename
         output_file.parent.mkdir(exist_ok=True, parents=True)
-        output_file.write_bytes(file.file.read())
+        data = file.file.read()
+        output_file.write_bytes(data)
+        texts.extend(extract_text_from_video(output_file.as_posix()))
 
-        scene_list = detect(output_file.as_posix(), AdaptiveDetector(adaptive_threshold=50))
+        audio_file = Path(extract_audio_from_video(output_file.as_posix()))
 
-        frames = chain.from_iterable(save_images(scene_list, open_video(output_file.as_posix()),
-                                                 output_dir="docs/frames/").values())
-        for frame_path in frames:
-            with open("docs/frames/" + frame_path, 'rb') as frame:
-                parsed_text = extract_text_from_image(frame, frame_path)
-            docs.append(parsed_text)
+        blob = Blob.from_path(audio_file.as_posix())
+        docs.extend(openai_whisper_parser.parse(blob))
 
-    splits = []
-    for doc in docs:
-        splits.extend(text_splitter.split_text(doc))
+        output_file.unlink()
+        audio_file.unlink()
 
-    vector_db.add_texts(splits)
+    split_texts = []
+    for text in texts:
+        split_texts.extend(text_splitter.split_text(text))
+    split_docs = text_splitter.split_documents(docs)
+
+    vector_db.add_documents(split_docs)
+    vector_db.add_texts(split_texts)
     vector_db.persist()
 
-    return Response(message=f"{len(files)} video(s) uploaded successfully")
+    return Response(message=f'{len(files)} video(s) uploaded successfully')
 
 
-@app.post("/youtube")
+@app.post('/youtube')
 def load_youtube_transcript(url: str) -> Response:
-    youtube_audio_save_dir = Path("docs/youtube")
+    youtube_audio_save_dir = Path('docs/youtube')
     youtube_audio_save_dir.mkdir(exist_ok=True, parents=True)
 
     loader = GenericLoader(
@@ -204,8 +210,8 @@ def load_youtube_transcript(url: str) -> Response:
     vector_db.add_documents(docs)
     vector_db.persist()
 
-    return Response(message=f"Transcript for {url} saved successfully")
+    return Response(message=f'{url} uploaded successfully')
 
 
 if __name__ == '__main__':
-    uvicorn.run(app, host="localhost", port=8000)
+    uvicorn.run(app, host='localhost', port=8000)
