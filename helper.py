@@ -5,6 +5,7 @@ from pathlib import Path
 from time import sleep
 from typing import BinaryIO
 
+import bcrypt
 import requests
 from moviepy.video.io.VideoFileClip import VideoFileClip
 from scenedetect import AdaptiveDetector, detect, open_video, save_images
@@ -87,3 +88,14 @@ def extract_audio_from_video(video_file: str, output_ext="mp3") -> str:
     with VideoFileClip(video_file) as clip:
         clip.audio.write_audiofile(f"{filename}.{output_ext}")
     return f"{filename}.{output_ext}"
+
+
+def get_hashed_password(plain_text_password: str) -> bytes:
+    # Hash a password for the first time
+    #   (Using bcrypt, the salt is saved into the hash itself)
+    return bcrypt.hashpw(plain_text_password.encode(), bcrypt.gensalt())
+
+
+def is_correct_password(plain_text_password: str, hashed_password: bytes) -> bool:
+    # Check hashed password. Using bcrypt, the salt is saved into the hash itself
+    return bcrypt.checkpw(plain_text_password.encode(), hashed_password)

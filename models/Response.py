@@ -2,4 +2,5 @@ from pydantic import BaseModel
 
 
 class Response(BaseModel):
-    message: str
+    message: str | None
+    detail: str | None

@@ -100,9 +100,10 @@ async def signup(user_signup: UserSignup) -> Response:
                 detail='Email already exists',
             )
 
+    hashed_password = get_hashed_password(user_signup.password)
     mysql_query = 'INSERT INTO users (name, email, password) VALUES (%s, %s, %s)'
     with db.cursor() as cursor:
-        cursor.execute(mysql_query, (user_signup.name, user_signup.email, user_signup.password))
+        cursor.execute(mysql_query, (user_signup.name, user_signup.email, hashed_password))
         db.commit()
 
     return Response(message='Signup successful')
@@ -110,21 +111,23 @@ async def signup(user_signup: UserSignup) -> Response:
 
 @app.post('/login')
 async def login(user_login: UserLogin) -> Response:
-    mysql_query = 'SELECT email, password FROM users WHERE email = %s AND password = %s'
-    with db.cursor() as cursor:
-        cursor.execute(mysql_query, (user_login.email, user_login.password))
-        user: RowType = cursor.fetchone()
-        if not user:
-            raise HTTPException(
-                status_code=HTTPStatus.UNAUTHORIZED,
-                detail='Incorrect email or password',
-            )
-        email, password = user
+    mysql_query = 'SELECT password FROM users WHERE email = %s'
 
-        if user_login.email != email or user_login.password != password:
+    with db.cursor() as cursor:
+        cursor.execute(mysql_query, (user_login.email,))
+        result: RowType = cursor.fetchone()
+        if not result:
             raise HTTPException(
                 status_code=HTTPStatus.UNAUTHORIZED,
-                detail='Incorrect email or password',
+                detail='Incorrect email',
+            )
+
+        password = bytes(result[0])
+
+        if not is_correct_password(user_login.password, password):
+            raise HTTPException(
+                status_code=HTTPStatus.UNAUTHORIZED,
+                detail='Incorrect password',
             )
 
     return Response(message='Login successful')
