@@ -128,7 +128,7 @@ async def login(user_login: UserLogin) -> Response:
     return Response(message='Login successful')
 
 
-@app.post('/upload')
+@app.post('/documents')
 def upload_documents(files: list[UploadFile]) -> Response:
     docs = []
     for file in files:
